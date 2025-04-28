@@ -282,3 +282,47 @@
   )
 )
 
+;; Smart claim processing system with automated risk assessment
+(define-public (process-claim-with-risk-assessment (claim-id uint))
+  (let
+    ((claim (unwrap! (map-get? claims claim-id) err-claim-not-found))
+     (pool-id (get pool-id claim))
+     (pool (unwrap! (map-get? insurance-pools pool-id) err-pool-not-found))
+     (user-policy (unwrap! (map-get? user-policies { user: (get claimer claim), pool-id: pool-id}) err-no-active-policy))
+     (total-votes (+ (get yes-votes claim) (get no-votes claim)))
+     (fraud-score (calculate-fraud-score claim-id))
+     (risk-threshold u65))
+    
+    ;; Check if claim is still pending
+    (asserts! (is-eq (get status claim) "pending") (err u108))
+    
+    ;; Check if claim has expired or received enough votes
+    (asserts! (or
+               (>= block-height (get expires-at claim))
+               (>= total-votes (var-get min-votes-required)))
+              (err u109))
+    
+    ;; Automated risk assessment
+    (if (< fraud-score risk-threshold)
+        ;; Low risk - process automatically if yes votes > no votes
+        (if (> (get yes-votes claim) (get no-votes claim))
+            (begin
+              ;; Approve claim and transfer funds
+              (try! (as-contract (stx-transfer? (get amount claim) tx-sender (get claimer claim))))
+              (map-set claims claim-id (merge claim { status: "approved" }))
+              (map-set user-policies 
+                       { user: (get claimer claim), pool-id: pool-id }
+                       (merge user-policy { active: false }))
+              (ok true))
+            ;; Rejected by votes
+            (begin
+              (map-set claims claim-id (merge claim { status: "rejected" }))
+              (ok false)))
+        ;; High risk - escalate to manual review
+        (begin
+          (map-set claims claim-id (merge claim { status: "manual-review" }))
+          (ok false))
+    )
+  )
+)
+
